@@ -29,8 +29,8 @@ export interface AiChatTurn {
 
 export interface ChatMessage {
   id: string;
-  room_code: string;
-  sender: string;
+  room_id: string;
+  sender_name: string;
   content: string;
   created_at: string;
 }

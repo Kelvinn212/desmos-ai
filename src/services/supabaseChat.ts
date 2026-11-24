@@ -1,6 +1,12 @@
 import { createClient, RealtimeChannel, SupabaseClient } from '@supabase/supabase-js';
 import { ChatMessage } from '../types';
-import { DEFAULT_SUPABASE_ANON_KEY, DEFAULT_SUPABASE_URL } from './storage';
+import {
+  cacheRoomMessages,
+  DEFAULT_SUPABASE_ANON_KEY,
+  DEFAULT_SUPABASE_URL,
+  loadRecentCachedRoomMessages,
+  TWO_HOURS_MS,
+} from './storage';
 
 let cachedClient: SupabaseClient | null = null;
 let cachedKeySig = '';
@@ -27,7 +33,7 @@ export function getSupabaseClient(
 }
 
 export interface RoomSubscriptionHandle {
-  sendMessage: (sender: string, content: string) => Promise<ChatMessage | null>;
+  sendMessage: (senderName: string, content: string) => Promise<ChatMessage | null>;
   unsubscribe: () => void;
 }
 
@@ -40,7 +46,7 @@ export function connectToChatRoom(options: {
   onConnectionChange?: (connected: boolean) => void;
 }): RoomSubscriptionHandle {
   const {
-    roomCode,
+    roomCode: roomId,
     supabaseUrl,
     supabaseAnonKey,
     onHistoryLoaded,
@@ -48,51 +54,99 @@ export function connectToChatRoom(options: {
     onConnectionChange,
   } = options;
 
-  const client = getSupabaseClient(supabaseUrl, supabaseAnonKey);
-  if (!client) {
-    onHistoryLoaded([]);
-    return {
-      sendMessage: async () => null,
-      unsubscribe: () => {},
-    };
-  }
-
   const seenIds = new Set<string>();
   let isDisposed = false;
 
-  // 1. Load existing room history from `messages` table
+  // Hydrate immediately with any non-expired (< 2 hours) locally cached messages for instant UX
+  const initialLocal = loadRecentCachedRoomMessages(roomId);
+  for (const m of initialLocal) {
+    seenIds.add(m.id);
+  }
+  if (initialLocal.length > 0) {
+    onHistoryLoaded(initialLocal);
+  }
+
+  const client = getSupabaseClient(supabaseUrl, supabaseAnonKey);
+  if (!client) {
+    if (initialLocal.length === 0) onHistoryLoaded([]);
+    return {
+      sendMessage: async (senderName: string, content: string) => {
+        const trimmed = content.trim();
+        if (!trimmed || isDisposed) return null;
+        const msg: ChatMessage = {
+          id:
+            typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+              ? crypto.randomUUID()
+              : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+          room_id: roomId,
+          sender_name: senderName.trim() || 'Guest',
+          content: trimmed,
+          created_at: new Date().toISOString(),
+        };
+        seenIds.add(msg.id);
+        cacheRoomMessages([msg]);
+        onNewRealtimeMessage(msg, false);
+        return msg;
+      },
+      unsubscribe: () => {
+        isDisposed = true;
+      },
+    };
+  }
+
+  // 1. Purge expired rows (> 2 hours old) and fetch active messages (< 2 hours old) ordered ASC
   void (async () => {
+    const cutoffIso = new Date(Date.now() - TWO_HOURS_MS).toISOString();
+
+    try {
+      // Delete expired messages older than 2 hours
+      await client.from('room_messages').delete().lt('created_at', cutoffIso);
+    } catch {
+      // Ignore cleanup permission errors if DELETE policy is not enabled
+    }
+
+    if (isDisposed) return;
+
     try {
       const { data, error } = await client
-        .from('messages')
-        .select('id, room_code, sender, content, created_at')
-        .eq('room_code', roomCode)
-        .order('created_at', { ascending: true })
-        .limit(100);
+        .from('room_messages')
+        .select('id, room_id, sender_name, content, created_at')
+        .eq('room_id', roomId)
+        .gte('created_at', cutoffIso)
+        .order('created_at', { ascending: true });
 
       if (isDisposed) return;
+
       if (!error && Array.isArray(data)) {
         const rows: ChatMessage[] = [];
         for (const raw of data) {
-          const msg = raw as ChatMessage;
-          if (msg?.id && !seenIds.has(msg.id)) {
-            seenIds.add(msg.id);
-            rows.push(msg);
+          const item = raw as ChatMessage;
+          if (item?.id && item.content) {
+            seenIds.add(item.id);
+            rows.push({
+              id: item.id,
+              room_id: String(item.room_id ?? roomId),
+              sender_name: item.sender_name || 'Guest',
+              content: item.content,
+              created_at: item.created_at || new Date().toISOString(),
+            });
           }
         }
+        cacheRoomMessages(rows);
         onHistoryLoaded(rows);
-      } else {
+      } else if (initialLocal.length === 0) {
         onHistoryLoaded([]);
       }
     } catch {
-      if (!isDisposed) onHistoryLoaded([]);
+      if (!isDisposed && initialLocal.length === 0) {
+        onHistoryLoaded([]);
+      }
     }
   })();
 
-  // 2. Subscribe to real-time INSERT events on `messages` filtered by room_code,
-  // plus Realtime Broadcast on the same channel so cross-device sync works instantaneously
-  // even if table replication/RLS is still being configured.
-  const channel: RealtimeChannel = client.channel(`desmos-room-${roomCode}`, {
+  // 2. Subscribe to Supabase Realtime postgres_changes INSERT events on `room_messages` filtered by `room_id`
+  // (plus Broadcast fallback deduplicated via `seenIds` so live messages never duplicate)
+  const channel: RealtimeChannel = client.channel(`desmos-room-${roomId}`, {
     config: {
       broadcast: { self: false },
     },
@@ -100,17 +154,26 @@ export function connectToChatRoom(options: {
 
   const handleIncoming = (incoming: Partial<ChatMessage> | undefined) => {
     if (isDisposed || !incoming?.id || !incoming.content) return;
-    if (incoming.room_code && incoming.room_code !== roomCode) return;
+    if (incoming.room_id && String(incoming.room_id) !== roomId) return;
     if (seenIds.has(incoming.id)) return;
+
+    // Ignore if older than 2 hours
+    if (incoming.created_at) {
+      const ts = new Date(incoming.created_at).getTime();
+      if (!Number.isNaN(ts) && ts < Date.now() - TWO_HOURS_MS) {
+        return;
+      }
+    }
 
     seenIds.add(incoming.id);
     const normalized: ChatMessage = {
       id: incoming.id,
-      room_code: incoming.room_code || roomCode,
-      sender: incoming.sender || 'User',
+      room_id: String(incoming.room_id || roomId),
+      sender_name: incoming.sender_name || 'Guest',
       content: incoming.content,
       created_at: incoming.created_at || new Date().toISOString(),
     };
+    cacheRoomMessages([normalized]);
     onNewRealtimeMessage(normalized, true);
   };
 
@@ -120,8 +183,8 @@ export function connectToChatRoom(options: {
       {
         event: 'INSERT',
         schema: 'public',
-        table: 'messages',
-        filter: `room_code=eq.${roomCode}`,
+        table: 'room_messages',
+        filter: `room_id=eq.${roomId}`,
       },
       (payload) => {
         handleIncoming(payload.new as Partial<ChatMessage>);
@@ -136,7 +199,7 @@ export function connectToChatRoom(options: {
     });
 
   const sendMessage = async (
-    sender: string,
+    senderName: string,
     content: string
   ): Promise<ChatMessage | null> => {
     const trimmed = content.trim();
@@ -147,27 +210,26 @@ export function connectToChatRoom(options: {
         typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
           ? crypto.randomUUID()
           : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
-      room_code: roomCode,
-      sender: sender.trim() || 'User',
+      room_id: roomId,
+      sender_name: senderName.trim() || 'Guest',
       content: trimmed,
       created_at: new Date().toISOString(),
     };
 
     seenIds.add(msg.id);
+    cacheRoomMessages([msg]);
     onNewRealtimeMessage(msg, false);
 
-    // Broadcast immediately to connected room peers
     void channel.send({
       type: 'broadcast',
       event: 'new_message',
       payload: msg,
     });
 
-    // Persist into Supabase `messages` table
-    void client.from('messages').insert({
+    await client.from('room_messages').insert({
       id: msg.id,
-      room_code: msg.room_code,
-      sender: msg.sender,
+      room_id: msg.room_id,
+      sender_name: msg.sender_name,
       content: msg.content,
       created_at: msg.created_at,
     });

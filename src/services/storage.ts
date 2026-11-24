@@ -1,5 +1,6 @@
 import {
   AppSettings,
+  ChatMessage,
   DESMOS_COLORS,
   ExpressionItem,
   SidebarItemType,
@@ -8,8 +9,11 @@ import {
 const SETTINGS_KEY = 'desmos_calc_settings_v1';
 const EXPRESSIONS_KEY = 'desmos_calc_expressions_v1';
 const TITLE_KEY = 'desmos_calc_title_v1';
-const CHAT_SENDER_KEY = 'desmos_chat_sender_v1';
+const CHAT_DISPLAY_NAME_KEY = 'desmos_chat_display_name_v1';
 const CHAT_ROOM_KEY = 'desmos_chat_room_v1';
+const CHAT_MESSAGES_CACHE_KEY = 'desmos_room_messages_2h_v1';
+
+export const TWO_HOURS_MS = 2 * 60 * 60 * 1000;
 
 export const DEFAULT_SUPABASE_URL =
   (import.meta.env.VITE_SUPABASE_URL as string | undefined)?.trim() || '';
@@ -67,23 +71,24 @@ export function saveSettings(settings: AppSettings): void {
   }
 }
 
+/**
+ * Loads the user's saved display name from localStorage.
+ * Defaults to '' so new users are required to enter their name before joining a room.
+ */
 export function loadChatSender(): string {
   try {
-    const existing = localStorage.getItem(CHAT_SENDER_KEY);
-    if (existing && existing.trim()) return existing.trim();
-    const generated = `User-${Math.floor(10 + Math.random() * 90)}`;
-    localStorage.setItem(CHAT_SENDER_KEY, generated);
-    return generated;
+    const existing = localStorage.getItem(CHAT_DISPLAY_NAME_KEY);
+    return existing ? existing.trim().slice(0, 24) : '';
   } catch {
-    return `User-${Math.floor(10 + Math.random() * 90)}`;
+    return '';
   }
 }
 
 export function saveChatSender(sender: string): void {
   try {
-    const cleaned = sender.trim().slice(0, 20);
+    const cleaned = sender.trim().slice(0, 24);
     if (cleaned) {
-      localStorage.setItem(CHAT_SENDER_KEY, cleaned);
+      localStorage.setItem(CHAT_DISPLAY_NAME_KEY, cleaned);
     }
   } catch {
     // Ignore
@@ -92,6 +97,8 @@ export function saveChatSender(sender: string): void {
 
 export function loadSavedRoomCode(): string | null {
   try {
+    const sender = loadChatSender();
+    if (!sender) return null;
     const code = localStorage.getItem(CHAT_ROOM_KEY);
     return code && /^\d{4}$/.test(code) ? code : null;
   } catch {
@@ -108,6 +115,70 @@ export function saveRoomCode(code: string | null): void {
     }
   } catch {
     // Ignore
+  }
+}
+
+/**
+ * Prunes cached messages older than 2 hours and returns non-expired cached messages for `roomId`.
+ */
+export function loadRecentCachedRoomMessages(roomId: string): ChatMessage[] {
+  try {
+    const raw = localStorage.getItem(CHAT_MESSAGES_CACHE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as ChatMessage[];
+    if (!Array.isArray(parsed)) return [];
+
+    const cutoffMs = Date.now() - TWO_HOURS_MS;
+    const fresh = parsed.filter((m) => {
+      const ts = new Date(m.created_at).getTime();
+      return !Number.isNaN(ts) && ts >= cutoffMs;
+    });
+
+    if (fresh.length !== parsed.length) {
+      localStorage.setItem(CHAT_MESSAGES_CACHE_KEY, JSON.stringify(fresh));
+    }
+
+    return fresh
+      .filter((m) => m.room_id === roomId)
+      .sort(
+        (a, b) =>
+          new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+      );
+  } catch {
+    return [];
+  }
+}
+
+export function cacheRoomMessages(messagesToMerge: ChatMessage[]): void {
+  try {
+    const raw = localStorage.getItem(CHAT_MESSAGES_CACHE_KEY);
+    const existing: ChatMessage[] = raw ? (JSON.parse(raw) as ChatMessage[]) : [];
+    const cutoffMs = Date.now() - TWO_HOURS_MS;
+
+    const byId = new Map<string, ChatMessage>();
+    for (const m of Array.isArray(existing) ? existing : []) {
+      const ts = new Date(m.created_at).getTime();
+      if (m?.id && !Number.isNaN(ts) && ts >= cutoffMs) {
+        byId.set(m.id, m);
+      }
+    }
+    for (const m of messagesToMerge) {
+      const ts = new Date(m.created_at).getTime();
+      if (m?.id && !Number.isNaN(ts) && ts >= cutoffMs) {
+        byId.set(m.id, m);
+      }
+    }
+
+    const merged = Array.from(byId.values())
+      .sort(
+        (a, b) =>
+          new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+      )
+      .slice(-300);
+
+    localStorage.setItem(CHAT_MESSAGES_CACHE_KEY, JSON.stringify(merged));
+  } catch {
+    // Ignore quota errors
   }
 }
 

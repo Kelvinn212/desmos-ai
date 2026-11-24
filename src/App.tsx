@@ -162,11 +162,14 @@ export const App: React.FC = () => {
     };
   }, [roomCode, settings.supabaseUrl, settings.supabaseAnonKey]);
 
-  const handleJoinRoom = useCallback((code: string) => {
-    const clean = code.replace(/\D/g, '').slice(0, 4);
-    if (clean.length !== 4) return;
-    setRoomCode(clean);
-    saveRoomCode(clean);
+  const handleJoinRoom = useCallback((code: string, displayName: string) => {
+    const cleanCode = code.replace(/\D/g, '').slice(0, 4);
+    const cleanName = displayName.trim().slice(0, 24);
+    if (cleanCode.length !== 4 || !cleanName) return;
+    setSenderName(cleanName);
+    saveChatSender(cleanName);
+    setRoomCode(cleanCode);
+    saveRoomCode(cleanCode);
     setHasUnreadChat(false);
   }, []);
 
@@ -178,7 +181,7 @@ export const App: React.FC = () => {
   }, []);
 
   const handleChangeSenderName = useCallback((nextName: string) => {
-    const clean = nextName.trim().slice(0, 20);
+    const clean = nextName.trim().slice(0, 24);
     if (!clean) return;
     setSenderName(clean);
     saveChatSender(clean);

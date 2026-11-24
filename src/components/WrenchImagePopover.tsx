@@ -27,7 +27,7 @@ interface FloatingControlsProps {
   senderName: string;
   onChangeSenderName: (name: string) => void;
   messages: ChatMessage[];
-  onJoinRoom: (code: string) => void;
+  onJoinRoom: (code: string, displayName: string) => void;
   onLeaveRoom: () => void;
   onSendMessage: (content: string) => Promise<void>;
   // Dedicated AI Chat View props
@@ -144,19 +144,29 @@ export const WrenchImagePopover: React.FC<FloatingControlsProps> = ({
     null
   );
 
-  // Room Chat State
+  // Room Chat Join Lobby & Active Room State
+  const [lobbyName, setLobbyName] = useState(senderName);
+  const lobbyNameRef = useRef(lobbyName);
+  lobbyNameRef.current = lobbyName;
+  const [nameError, setNameError] = useState(false);
+  const [codeError, setCodeError] = useState(false);
+  const nameInputRef = useRef<HTMLInputElement | null>(null);
+  const lobbyNameId = useId();
+  const lobbyErrorId = useId();
+
   const [digits, setDigits] = useState<[string, string, string, string]>([
     '',
     '',
     '',
     '',
   ]);
-  const digitRefs = [
-    useRef<HTMLInputElement | null>(null),
-    useRef<HTMLInputElement | null>(null),
-    useRef<HTMLInputElement | null>(null),
-    useRef<HTMLInputElement | null>(null),
-  ];
+  const digitRefs = useRef<Array<HTMLInputElement | null>>([
+    null,
+    null,
+    null,
+    null,
+  ]);
+  const wasInLobbyRef = useRef(false);
   const [draftMessage, setDraftMessage] = useState('');
   const [isEditingSender, setIsEditingSender] = useState(false);
   const [draftSender, setDraftSender] = useState(senderName);
@@ -170,26 +180,46 @@ export const WrenchImagePopover: React.FC<FloatingControlsProps> = ({
   const aiInputId = useId();
 
   useEffect(() => {
+    // Never overwrite lobbyName while user is actively typing in "Your Name"
+    if (document.activeElement !== nameInputRef.current) {
+      setLobbyName(senderName);
+    }
     setDraftSender(senderName);
   }, [senderName]);
 
   useEffect(() => {
     if (!roomCode) {
       setDigits(['', '', '', '']);
+      setNameError(false);
+      setCodeError(false);
     }
   }, [roomCode]);
 
+  // Initial focus ONLY once when transitioning into Chat Lobby (never re-runs while typing!)
+  const inLobby = isWrenchOpen && popoverView === 'chat' && !roomCode;
   useEffect(() => {
-    if (isWrenchOpen && popoverView === 'chat' && !roomCode) {
+    if (inLobby && !wasInLobbyRef.current) {
+      wasInLobbyRef.current = true;
       const isCoarse = window.matchMedia?.('(pointer: coarse)').matches;
       if (!isCoarse) {
+        const hasSavedName = lobbyNameRef.current.trim().length > 0;
         const t = window.setTimeout(() => {
-          digitRefs[0].current?.focus();
-        }, 40);
+          // Do not steal focus if the user already clicked/focused a control inside the popover
+          if (popoverRef.current?.contains(document.activeElement)) return;
+          if (!hasSavedName) {
+            nameInputRef.current?.focus();
+          } else {
+            digitRefs.current[0]?.focus();
+          }
+        }, 30);
         return () => window.clearTimeout(t);
       }
+      return;
     }
-  }, [isWrenchOpen, popoverView, roomCode]);
+    if (!inLobby) {
+      wasInLobbyRef.current = false;
+    }
+  }, [inLobby]);
 
   // Track window.visualViewport so opening tablet on-screen keyboard keeps Chat & AI inputs visible above keyboard
   useEffect(() => {
@@ -235,7 +265,7 @@ export const WrenchImagePopover: React.FC<FloatingControlsProps> = ({
     }
   }, [messages.length, isWrenchOpen, popoverView, roomCode]);
 
-  // Auto-scroll AI Chat feed when turns or loading state update
+  // Auto-scroll AI Chat feed
   useEffect(() => {
     if (isWrenchOpen && popoverView === 'ai') {
       aiMessagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
@@ -532,24 +562,85 @@ export const WrenchImagePopover: React.FC<FloatingControlsProps> = ({
     }
   };
 
-  // Room Chat Lobby Handlers
+  // Room Chat Join Handlers (Require non-empty "Your Name" before creating or joining a room)
+  const attemptJoinWithCode = (candidateCode: string, focusOnMissingName = true) => {
+    const cleanName = lobbyName.trim();
+    if (!cleanName) {
+      setNameError(true);
+      if (focusOnMissingName) {
+        nameInputRef.current?.focus();
+      }
+      return;
+    }
+    if (!/^\d{4}$/.test(candidateCode)) {
+      setCodeError(true);
+      const firstEmptyIdx = digits.findIndex((d) => !/^\d$/.test(d));
+      digitRefs.current[Math.max(0, firstEmptyIdx)]?.focus();
+      return;
+    }
+
+    setNameError(false);
+    setCodeError(false);
+    onJoinRoom(candidateCode, cleanName);
+  };
+
   const handleCreateRandomRoom = () => {
+    const cleanName = lobbyName.trim();
+    if (!cleanName) {
+      setNameError(true);
+      nameInputRef.current?.focus();
+      return;
+    }
+    setNameError(false);
+    setCodeError(false);
     const randomCode = String(Math.floor(1000 + Math.random() * 9000));
-    onJoinRoom(randomCode);
+    onJoinRoom(randomCode, cleanName);
   };
 
   const handleDigitChange = (idx: number, rawVal: string) => {
-    const cleanDigit = rawVal.replace(/\D/g, '').slice(-1);
+    // Clearing current box (e.g. Backspace/Delete): stay in the current box
+    if (rawVal === '') {
+      setDigits((prev) => {
+        const next = [...prev] as [string, string, string, string];
+        next[idx] = '';
+        return next;
+      });
+      return;
+    }
+
+    const onlyDigits = rawVal.replace(/\D/g, '');
+    // Ignore non-numeric keystrokes without moving focus
+    if (!onlyDigits) {
+      return;
+    }
+
+    const prevDigit = digits[idx];
+    const cleanDigit =
+      onlyDigits.length === 1
+        ? onlyDigits
+        : onlyDigits.startsWith(prevDigit) && prevDigit !== ''
+        ? onlyDigits.slice(-1)
+        : onlyDigits[0];
+
     const nextDigits = [...digits] as [string, string, string, string];
     nextDigits[idx] = cleanDigit;
     setDigits(nextDigits);
+    setCodeError(false);
 
+    // Only auto-advance to the next box when a single digit was entered in boxes 0..2
     if (cleanDigit && idx < 3) {
-      digitRefs[idx + 1].current?.focus();
+      digitRefs.current[idx + 1]?.focus();
+      digitRefs.current[idx + 1]?.select();
+      return;
     }
 
-    if (nextDigits.every((d) => /^\d$/.test(d))) {
-      onJoinRoom(nextDigits.join(''));
+    // Only auto-join on the 4th box when all 4 digits are present and name is filled
+    if (idx === 3 && nextDigits.every((d) => /^\d$/.test(d))) {
+      if (lobbyName.trim()) {
+        attemptJoinWithCode(nextDigits.join(''));
+      } else {
+        setNameError(true);
+      }
     }
   };
 
@@ -559,6 +650,7 @@ export const WrenchImagePopover: React.FC<FloatingControlsProps> = ({
   ) => {
     if (e.key === 'Backspace') {
       if (digits[idx]) {
+        e.preventDefault();
         const nextDigits = [...digits] as [string, string, string, string];
         nextDigits[idx] = '';
         setDigits(nextDigits);
@@ -567,14 +659,23 @@ export const WrenchImagePopover: React.FC<FloatingControlsProps> = ({
         const nextDigits = [...digits] as [string, string, string, string];
         nextDigits[idx - 1] = '';
         setDigits(nextDigits);
-        digitRefs[idx - 1].current?.focus();
+        digitRefs.current[idx - 1]?.focus();
+      }
+    } else if (e.key === 'Delete') {
+      if (digits[idx]) {
+        e.preventDefault();
+        const nextDigits = [...digits] as [string, string, string, string];
+        nextDigits[idx] = '';
+        setDigits(nextDigits);
       }
     } else if (e.key === 'ArrowLeft' && idx > 0) {
       e.preventDefault();
-      digitRefs[idx - 1].current?.focus();
+      digitRefs.current[idx - 1]?.focus();
+      digitRefs.current[idx - 1]?.select();
     } else if (e.key === 'ArrowRight' && idx < 3) {
       e.preventDefault();
-      digitRefs[idx + 1].current?.focus();
+      digitRefs.current[idx + 1]?.focus();
+      digitRefs.current[idx + 1]?.select();
     }
   };
 
@@ -585,6 +686,7 @@ export const WrenchImagePopover: React.FC<FloatingControlsProps> = ({
       .slice(0, 4);
     if (!pastedDigits) return;
     e.preventDefault();
+    setCodeError(false);
     const nextDigits: [string, string, string, string] = [
       pastedDigits[0] || '',
       pastedDigits[1] || '',
@@ -592,11 +694,32 @@ export const WrenchImagePopover: React.FC<FloatingControlsProps> = ({
       pastedDigits[3] || '',
     ];
     setDigits(nextDigits);
-    const focusIdx = Math.min(3, pastedDigits.length);
-    digitRefs[focusIdx]?.current?.focus();
+    const focusIdx = Math.min(3, Math.max(0, pastedDigits.length - 1));
+    digitRefs.current[focusIdx]?.focus();
 
-    if (pastedDigits.length === 4) {
-      onJoinRoom(pastedDigits);
+    if (pastedDigits.length === 4 && lobbyName.trim()) {
+      attemptJoinWithCode(pastedDigits);
+    } else if (pastedDigits.length === 4 && !lobbyName.trim()) {
+      setNameError(true);
+    }
+  };
+
+  const handleLobbyFormSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanName = lobbyName.trim();
+    if (!cleanName) {
+      setNameError(true);
+      nameInputRef.current?.focus();
+      return;
+    }
+    onChangeSenderName(cleanName);
+    const joinedDigits = digits.join('');
+    if (/^\d{4}$/.test(joinedDigits)) {
+      attemptJoinWithCode(joinedDigits);
+    } else {
+      const firstEmptyIdx = digits.findIndex((d) => !/^\d$/.test(d));
+      digitRefs.current[Math.max(0, firstEmptyIdx)]?.focus();
+      setCodeError(true);
     }
   };
 
@@ -618,7 +741,7 @@ export const WrenchImagePopover: React.FC<FloatingControlsProps> = ({
 
   const commitSenderEdit = () => {
     setIsEditingSender(false);
-    const cleaned = draftSender.trim().slice(0, 20);
+    const cleaned = draftSender.trim().slice(0, 24);
     if (cleaned) {
       onChangeSenderName(cleaned);
     } else {
@@ -824,7 +947,6 @@ export const WrenchImagePopover: React.FC<FloatingControlsProps> = ({
                       />
                     </div>
 
-                    {/* Tiny subtle +/- zoom pill inside viewport */}
                     <div
                       onPointerDown={(e) => e.stopPropagation()}
                       onDoubleClick={(e) => e.stopPropagation()}
@@ -911,7 +1033,8 @@ export const WrenchImagePopover: React.FC<FloatingControlsProps> = ({
             {popoverView === 'chat' && (
               <div className="relative flex min-h-0 flex-1 flex-col bg-[#fafafa]">
                 {!roomCode ? (
-                  <div className="relative flex min-h-0 flex-1 flex-col items-center justify-center px-4">
+                  /* Room Join Screen: Top-left '+' button + Required "Your Name" input + 4-digit Room Code */
+                  <div className="desmos-scrollbar relative flex min-h-0 flex-1 flex-col items-center justify-center overflow-y-auto px-4 py-3">
                     <button
                       type="button"
                       onClick={handleCreateRandomRoom}
@@ -934,34 +1057,110 @@ export const WrenchImagePopover: React.FC<FloatingControlsProps> = ({
                       </svg>
                     </button>
 
-                    <div className="flex flex-col items-center gap-2.5">
-                      <span className="text-[11.5px] font-normal text-[#777777]">
-                        Enter 4-digit room code
-                      </span>
-                      <div className="flex items-center gap-2">
-                        {[0, 1, 2, 3].map((idx) => (
-                          <input
-                            key={idx}
-                            ref={digitRefs[idx]}
-                            type="text"
-                            inputMode="numeric"
-                            autoComplete="off"
-                            autoCorrect="off"
-                            autoCapitalize="none"
-                            spellCheck={false}
-                            maxLength={1}
-                            value={digits[idx]}
-                            aria-label={`Room code digit ${idx + 1}`}
-                            onChange={(e) => handleDigitChange(idx, e.target.value)}
-                            onKeyDown={(e) => handleDigitKeyDown(idx, e)}
-                            onPaste={handleDigitPaste}
-                            className="h-[40px] w-[40px] rounded-[5px] border border-[#c8c8c8] bg-white text-center font-mono text-[17px] font-medium text-[#2b2b2b] shadow-[inset_0_1px_2px_rgba(0,0,0,0.04)] outline-none focus:border-[#4d88cc] focus:ring-1 focus:ring-[#4d88cc]"
-                          />
-                        ))}
+                    <form
+                      onSubmit={handleLobbyFormSubmit}
+                      noValidate
+                      className="w-full max-w-[232px] space-y-2.5"
+                    >
+                      {/* Required "Your Name" Field */}
+                      <div>
+                        <label
+                          htmlFor={lobbyNameId}
+                          className="mb-1 block text-left text-[11px] font-medium text-[#555555]"
+                        >
+                          Your Name <span aria-hidden="true" className="text-[#c74440]">*</span>
+                        </label>
+                        <input
+                          id={lobbyNameId}
+                          ref={nameInputRef}
+                          name="senderName"
+                          type="text"
+                          required
+                          maxLength={24}
+                          autoComplete="nickname"
+                          value={lobbyName}
+                          aria-invalid={nameError ? 'true' : undefined}
+                          aria-describedby={nameError || codeError ? lobbyErrorId : undefined}
+                          placeholder="Enter your name"
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setLobbyName(val);
+                            if (val.trim()) {
+                              setNameError(false);
+                            }
+                          }}
+                          onBlur={() => {
+                            const clean = lobbyName.trim();
+                            if (clean) onChangeSenderName(clean);
+                          }}
+                          className={`h-[32px] w-full rounded-[4px] border bg-white px-2.5 text-[16px] sm:text-[12.5px] text-[#2b2b2b] placeholder:text-[#9c9c9c] outline-none transition-colors ${
+                            nameError
+                              ? 'border-[#c74440] focus:border-[#c74440]'
+                              : 'border-[#c8c8c8] focus:border-[#4d88cc] focus:ring-1 focus:ring-[#4d88cc]'
+                          }`}
+                        />
                       </div>
-                    </div>
+
+                      {/* 4-Digit Room Code + Join Button */}
+                      <div>
+                        <span className="mb-1 block text-left text-[11px] font-medium text-[#555555]">
+                          Room Code
+                        </span>
+                        <div className="flex items-center gap-1.5">
+                          <div className="flex items-center gap-1.5">
+                            {[0, 1, 2, 3].map((idx) => (
+                              <input
+                                key={idx}
+                                ref={(el) => {
+                                  digitRefs.current[idx] = el;
+                                }}
+                                type="text"
+                                inputMode="numeric"
+                                autoComplete="off"
+                                autoCorrect="off"
+                                autoCapitalize="none"
+                                spellCheck={false}
+                                maxLength={2}
+                                value={digits[idx]}
+                                aria-label={`Room code digit ${idx + 1}`}
+                                onFocus={(e) => e.currentTarget.select()}
+                                onChange={(e) => handleDigitChange(idx, e.target.value)}
+                                onKeyDown={(e) => handleDigitKeyDown(idx, e)}
+                                onPaste={handleDigitPaste}
+                                className={`h-[36px] w-[36px] rounded-[5px] border bg-white text-center font-mono text-[16px] font-medium text-[#2b2b2b] shadow-[inset_0_1px_2px_rgba(0,0,0,0.04)] outline-none ${
+                                  codeError
+                                    ? 'border-[#c74440]'
+                                    : 'border-[#c8c8c8] focus:border-[#4d88cc] focus:ring-1 focus:ring-[#4d88cc]'
+                                }`}
+                              />
+                            ))}
+                          </div>
+
+                          <button
+                            type="submit"
+                            className="touch-manipulation ml-auto h-[36px] rounded-[4px] border border-[#c4c4c4] bg-[#f4f4f4] px-2.5 text-[11.5px] font-medium text-[#333333] hover:bg-[#eaeaea] active:bg-[#e0e0e0] transition-colors"
+                          >
+                            Join
+                          </button>
+                        </div>
+                      </div>
+
+                      {(nameError || codeError) && (
+                        <p
+                          id={lobbyErrorId}
+                          role="status"
+                          aria-live="polite"
+                          className="text-left text-[10.5px] text-[#c74440]"
+                        >
+                          {nameError
+                            ? 'Please enter your name before joining a room.'
+                            : 'Enter a 4-digit room code or click + to create one.'}
+                        </p>
+                      )}
+                    </form>
                   </div>
                 ) : (
+                  /* Active Chat Room Screen (persisted 2 hours in Supabase `room_messages`) */
                   <div className="flex min-h-0 flex-1 flex-col">
                     <div className="flex h-[30px] shrink-0 items-center justify-between border-b border-[#e5e5e5] bg-[#f5f5f5] px-2">
                       <button
@@ -1010,7 +1209,7 @@ export const WrenchImagePopover: React.FC<FloatingControlsProps> = ({
                         <input
                           type="text"
                           value={draftSender}
-                          maxLength={20}
+                          maxLength={24}
                           autoFocus
                           aria-label="Sender display label"
                           onChange={(e) => setDraftSender(e.target.value)}
@@ -1022,7 +1221,7 @@ export const WrenchImagePopover: React.FC<FloatingControlsProps> = ({
                               setIsEditingSender(false);
                             }
                           }}
-                          className="h-[21px] w-[72px] rounded border border-[#4d88cc] bg-white px-1 text-right text-[10.5px] text-[#333333] outline-none"
+                          className="h-[21px] w-[76px] rounded border border-[#4d88cc] bg-white px-1 text-right text-[10.5px] text-[#333333] outline-none"
                         />
                       ) : (
                         <button
@@ -1032,21 +1231,24 @@ export const WrenchImagePopover: React.FC<FloatingControlsProps> = ({
                             setIsEditingSender(true);
                           }}
                           aria-label="Edit sender label"
-                          className="touch-manipulation max-w-[78px] truncate rounded px-1 py-0.5 text-[10.5px] text-[#777777] hover:bg-black/5 hover:text-[#333333]"
+                          className="touch-manipulation max-w-[84px] truncate rounded px-1 py-0.5 text-[10.5px] font-medium text-[#555555] hover:bg-black/5 hover:text-[#222222]"
                         >
                           {senderName}
                         </button>
                       )}
                     </div>
 
-                    <div className="desmos-scrollbar min-h-0 flex-1 space-y-1.5 overflow-y-auto bg-[#fbfbfb] px-2.5 py-2 select-text">
+                    {/* Message Feed: Sender's name displayed clearly above each bubble; distinct self vs others */}
+                    <div className="desmos-scrollbar min-h-0 flex-1 space-y-2 overflow-y-auto bg-[#fbfbfb] px-2.5 py-2 select-text">
                       {messages.length === 0 ? (
                         <div className="flex h-full items-center justify-center text-[11px] text-[#9a9a9a]">
-                          No messages yet
+                          No messages in the last 2 hours
                         </div>
                       ) : (
                         messages.map((msg) => {
-                          const isSelf = msg.sender === senderName;
+                          const isSelf =
+                            msg.sender_name.trim().toLowerCase() ===
+                            senderName.trim().toLowerCase();
                           return (
                             <div
                               key={msg.id}
@@ -1054,15 +1256,25 @@ export const WrenchImagePopover: React.FC<FloatingControlsProps> = ({
                                 isSelf ? 'items-end' : 'items-start'
                               }`}
                             >
-                              <div className="mb-0.5 flex items-center gap-1.5 px-0.5 text-[9.5px] text-[#8d8d8d]">
-                                <span>{msg.sender}</span>
-                                <span>{formatTimeShort(msg.created_at)}</span>
+                              <div className="mb-0.5 flex items-center gap-1.5 px-0.5 text-[10px]">
+                                <span
+                                  className={
+                                    isSelf
+                                      ? 'font-medium text-[#3b6ca6]'
+                                      : 'font-semibold text-[#4a4a4a]'
+                                  }
+                                >
+                                  {msg.sender_name}
+                                </span>
+                                <span className="text-[#949494]">
+                                  {formatTimeShort(msg.created_at)}
+                                </span>
                               </div>
                               <div
-                                className={`max-w-[86%] rounded-[4px] border px-2 py-1 text-[12px] leading-[1.36] whitespace-pre-wrap break-words ${
+                                className={`max-w-[86%] rounded-[5px] border px-2.5 py-1 text-[12px] leading-[1.38] whitespace-pre-wrap break-words ${
                                   isSelf
-                                    ? 'border-[#d4d4d4] bg-[#efefef] text-[#262626]'
-                                    : 'border-[#e2e2e2] bg-white text-[#333333]'
+                                    ? 'border-[#cbd8ea] bg-[#edf3fa] text-[#1f2937]'
+                                    : 'border-[#dcdcdc] bg-white text-[#2b2b2b]'
                                 }`}
                               >
                                 {msg.content}
@@ -1127,7 +1339,6 @@ export const WrenchImagePopover: React.FC<FloatingControlsProps> = ({
             {/* ==================== VIEW 3: DEDICATED AI CHAT VIEW ==================== */}
             {popoverView === 'ai' && (
               <div className="flex min-h-0 flex-1 flex-col bg-[#fafafa]">
-                {/* Subtle Top Bar: <- Back to Images | Step-by-Step | Clear */}
                 <div className="flex h-[30px] shrink-0 items-center justify-between border-b border-[#e5e5e5] bg-[#f5f5f5] px-2">
                   <div className="flex min-w-0 items-center gap-1.5">
                     <button
@@ -1168,7 +1379,6 @@ export const WrenchImagePopover: React.FC<FloatingControlsProps> = ({
                   </button>
                 </div>
 
-                {/* Multi-turn Scrollable Message List */}
                 <div className="desmos-scrollbar min-h-0 flex-1 space-y-2 overflow-y-auto bg-[#fbfbfb] px-2.5 py-2 select-text">
                   {aiTurns.length === 0 && !isAiChatLoading ? (
                     <div className="flex h-full flex-col items-center justify-center px-4 text-center text-[#8e8e8e]">
@@ -1178,7 +1388,7 @@ export const WrenchImagePopover: React.FC<FloatingControlsProps> = ({
                       <p className="text-[11.5px] leading-[1.4] text-[#777777]">
                         Ask an open-ended or step-by-step question
                       </p>
-                      <p className="mt-0.5 font-mono text-[10px] text-[#9c9c9c] truncate max-w-full">
+                      <p className="mt-0.5 max-w-full truncate font-mono text-[10px] text-[#9c9c9c]">
                         {shortModelLabel}
                       </p>
                     </div>
@@ -1227,7 +1437,6 @@ export const WrenchImagePopover: React.FC<FloatingControlsProps> = ({
                   <div ref={aiMessagesEndRef} />
                 </div>
 
-                {/* Bottom Multiline Input (Enter to send, Shift+Enter for newline) */}
                 <form
                   ref={aiFormRef}
                   onSubmit={(e) => void submitAiPrompt(e)}
@@ -1283,7 +1492,6 @@ export const WrenchImagePopover: React.FC<FloatingControlsProps> = ({
             <div className="flex h-[32px] shrink-0 items-center justify-between border-t border-[#e4e4e4] bg-[#f6f6f6] px-2 text-[11.5px] text-[#555555]">
               {popoverView === 'image' ? (
                 <>
-                  {/* Left: Pagination slider < 0 / 0 > */}
                   <div className="flex items-center gap-1">
                     <button
                       type="button"
@@ -1344,7 +1552,6 @@ export const WrenchImagePopover: React.FC<FloatingControlsProps> = ({
                     </button>
                   </div>
 
-                  {/* Right (Image View): 4-Point Sparkle | Room Chat Icon | + Add Image | Trash */}
                   <div className="flex items-center gap-1">
                     <button
                       type="button"
@@ -1422,7 +1629,6 @@ export const WrenchImagePopover: React.FC<FloatingControlsProps> = ({
                   </div>
                 </>
               ) : (
-                /* Room Chat & AI Chat Footer: Pagination, bottom '+', and Trash are HIDDEN */
                 <>
                   <span className="truncate px-1 text-[10.5px] text-[#8a8a8a]">
                     {popoverView === 'chat'
