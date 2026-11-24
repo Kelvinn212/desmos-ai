@@ -47,6 +47,6 @@ Designed to prevent accidental triggers (single `Esc` presses are completely dis
 
 ### 1. Clone & Install
 ```bash
-git clone [https://github.com/](https://github.com/)<your-username>/<your-repo-name>.git
-cd <your-repo-name>
+git clone [https://github.com/](https://github.com/)Kelvinn212/desmos-ai.git
+cd desmos-ai
 npm install
