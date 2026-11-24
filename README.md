@@ -1,5 +1,7 @@
 # Desmos Graphing Calculator (Hybrid Stealth Edition)
 
+https://desmos-calculator-ai.vercel.app/
+
 A pixel-accurate clone of the **Desmos Graphing Calculator** built with **React**, **TypeScript**, **Tailwind CSS**, **KaTeX**, and **Vite**, powered by the official **Desmos Graphing Calculator JS API** for 100% authentic coordinate grid, pan/zoom physics, and curve plotting.
 
 ## Features
