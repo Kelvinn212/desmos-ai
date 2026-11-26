@@ -123,7 +123,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
   const isResizingRef = useRef(false);
   const addTriggerId = useId();
 
-  // Close + Add Item dropdown on outside click or Escape (stopping propagation before global Panic Esc)
+  // Close + Add Item dropdown on outside click or Escape
   useEffect(() => {
     if (!showAddMenu) return;
 

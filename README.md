@@ -20,9 +20,9 @@ A pixel-accurate clone of the **Desmos Graphing Calculator** built with **React*
    - Cursor-centered mouse wheel / trackpad pinch zoom, `+/-` controls, click-and-drag panning, `< 1 / N >` multi-image pagination, and persistent local storage in **IndexedDB**.
 
 4. **Two-Tier Panic System (Preserves All Saved Data & Keys)**
-   - **Single `Escape`**: Disabled as a panic trigger to prevent accidental activations.
+   - **`Escape` Disabled**: Pressing `Escape` (single or multiple times) never triggers panic, preventing accidental activations.
    - **Tier 1 — Quick Hide** (`Double-Tap Shift` within 400ms OR `Double-Tap Top-Right Help (?) Icon`): Immediately closes the Wrench popover, hides visible inline AI outputs with decoy equations, and stops the green unread chat pulse without deleting any images, chat state, or settings.
-   - **Tier 2 — Instant Official Desmos Redirect** (`Triple-Press Escape` within 800ms OR `Triple-Tap Top-Left Folder Icon`): Immediately redirects via `window.location.replace("https://www.desmos.com/calculator")` while keeping all API keys, `localStorage` config, chat rooms, and `IndexedDB` images intact.
+   - **Tier 2 — Instant Official Desmos Redirect** (`Double-Tap Tab` within 400ms OR `Triple-Tap Top-Left Folder Icon`): Immediately redirects via `window.location.replace("https://www.desmos.com/calculator")` while keeping all API keys, `localStorage` config, chat rooms, and `IndexedDB` images intact.
 
 5. **Hidden Configuration Modal**
    - **Triple-click** the centered `desmos` wordmark in the top header to configure AI provider/API key/model, trigger mode, system prompt, decoy equations, and IndexedDB image cache.

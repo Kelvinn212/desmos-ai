@@ -330,33 +330,39 @@ export const App: React.FC = () => {
   }, []);
 
   // Global Two-Tier Keyboard Listeners:
-  // - Single Escape does NOTHING (accidental presses ignored).
-  // - Triple-Press Escape within 800ms -> Tier 2 Instant Official Desmos Redirect.
+  // - Escape does NOT trigger panic (accidental presses ignored).
+  // - Double-Tap Tab within 400ms -> Tier 2 Instant Official Desmos Redirect.
   // - Double-Tap Shift within 400ms -> Tier 1 Quick Hide toggle.
   const lastShiftDownRef = useRef<number>(0);
   const cleanShiftTapRef = useRef<boolean>(false);
-  const escPressTimestampsRef = useRef<number[]>([]);
+  const lastTabDownRef = useRef<number>(0);
+  const cleanTabTapRef = useRef<boolean>(false);
 
   useEffect(() => {
     const handleKeyDownCapture = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        if (e.repeat) return;
+      if (e.key === 'Tab') {
+        cleanShiftTapRef.current = false;
+        if (e.repeat || e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) {
+          cleanTabTapRef.current = false;
+          return;
+        }
         const now = performance.now();
-        const recent = escPressTimestampsRef.current.filter((t) => now - t <= 800);
-        recent.push(now);
-        escPressTimestampsRef.current = recent;
-
-        if (recent.length >= 3) {
-          escPressTimestampsRef.current = [];
+        if (cleanTabTapRef.current && now - lastTabDownRef.current <= 400) {
+          lastTabDownRef.current = 0;
+          cleanTabTapRef.current = false;
           e.preventDefault();
           e.stopPropagation();
           triggerTier2OfficialRedirect();
+          return;
         }
-        // Single Escape intentionally does NOT trigger panic or close Wrench popover
+        // Single Tab preserves native sequential focus navigation
+        lastTabDownRef.current = now;
+        cleanTabTapRef.current = true;
         return;
       }
 
       if (e.key === 'Shift') {
+        cleanTabTapRef.current = false;
         if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
         const now = performance.now();
         if (cleanShiftTapRef.current && now - lastShiftDownRef.current <= 400) {
@@ -372,10 +378,20 @@ export const App: React.FC = () => {
       }
 
       cleanShiftTapRef.current = false;
+      cleanTabTapRef.current = false;
+    };
+
+    const handlePointerDownReset = () => {
+      cleanShiftTapRef.current = false;
+      cleanTabTapRef.current = false;
     };
 
     window.addEventListener('keydown', handleKeyDownCapture, true);
-    return () => window.removeEventListener('keydown', handleKeyDownCapture, true);
+    window.addEventListener('pointerdown', handlePointerDownReset, true);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDownCapture, true);
+      window.removeEventListener('pointerdown', handlePointerDownReset, true);
+    };
   }, [triggerTier1QuickHide, triggerTier2OfficialRedirect]);
 
   const activeExpressions = isPanicMode ? decoyExpressions : userExpressions;
